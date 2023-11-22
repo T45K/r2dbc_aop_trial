@@ -1,9 +1,16 @@
 package io.github.t45k.r2dbc_aop_trial
 
 import io.r2dbc.spi.ConnectionFactory
-import kotlinx.coroutines.reactive.awaitFirst
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.startCoroutine
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.intrinsics.startCoroutineCancellable
+import kotlinx.coroutines.reactive.awaitSingle
 import kotlinx.coroutines.runBlocking
 import org.aspectj.lang.JoinPoint
+import org.aspectj.lang.ProceedingJoinPoint
+import org.aspectj.lang.annotation.Around
 import org.aspectj.lang.annotation.Aspect
 import org.aspectj.lang.annotation.Before
 import org.jooq.impl.DSL
@@ -21,6 +28,11 @@ import org.springframework.stereotype.Component
 import org.springframework.stereotype.Repository
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.RestController
+import org.springframework.web.reactive.function.client.WebClient
+import org.springframework.web.reactive.function.client.awaitExchangeOrNull
+import  kotlin.coroutines.intrinsics.startCoroutineUninterceptedOrReturn
+import  kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
+import kotlin.coroutines.suspendCoroutine
 
 @SpringBootApplication
 @RestController
@@ -30,16 +42,22 @@ import org.springframework.web.bind.annotation.RestController
 class R2dbcAopTrialApplication(
     private val jooqRepo: JooqRepo,
 ) {
+    private val webClient = WebClient.create()
+
     @GetMapping("nonblocking")
     suspend fun nonBlocking(): Long = jooqRepo.count()
 
     @GetMapping("blocking/aop")
-    suspend fun aop(): Long = jooqRepo.count()
+    suspend fun aop(): String {
+        webClient.get().uri("http://localhost:8080/nonblocking")
+            .awaitExchangeOrNull { println(it) }
+
+        return Thread.currentThread().name
+    }
 
     @GetMapping("blocking/security")
     @PreAuthorize("@authorizer.auth()")
     suspend fun security(): Long = jooqRepo.count()
-
 
     @GetMapping("blocking/both")
     @PreAuthorize("@authorizer.auth()")
@@ -58,10 +76,17 @@ class Authorizer(private val repo: JooqRepo) {
 @Component
 @Aspect
 class Aspect(private val repo: JooqRepo) {
-    @Before("execution(* aop(..)) or execution(* both(..))")
-    fun execute(joinPoint: JoinPoint) = runBlocking {
-        println("through aop")
-        repo.count()
+    @Around("execution(* aop(..)) || execution(* both(..))")
+    fun execute(joinPoint: ProceedingJoinPoint): Any? {
+        val completion = joinPoint.args.last() as Continuation<Any>
+        return suspend {
+            println(Thread.currentThread().name)
+            repo.count()
+            suspendCoroutineUninterceptedOrReturn<Any> {
+                println(Thread.currentThread().name)
+                joinPoint.proceed(joinPoint.args.sliceArray(0..<joinPoint.args.size - 1) + it)
+            }
+        }.startCoroutineUninterceptedOrReturn(completion)
     }
 }
 
@@ -69,7 +94,7 @@ class Aspect(private val repo: JooqRepo) {
 class JooqRepo(connectionFactory: ConnectionFactory) {
     private val dslContext = DSL.using(connectionFactory).dsl()
 
-    suspend fun count(): Long = dslContext.query("select count(*) from batch").awaitFirst().toLong()
+    suspend fun count(): Long = dslContext.query("select count(*) from batch").awaitSingle().toLong()
 }
 
 @Configuration
