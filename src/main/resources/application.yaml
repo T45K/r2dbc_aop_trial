@@ -1,0 +1,5 @@
+spring:
+  r2dbc:
+    url: r2dbc:mysql://127.0.0.1/hottocoffee
+    username: root
+    password: root
