@@ -1,18 +1,11 @@
 package io.github.t45k.r2dbc_aop_trial
 
 import io.r2dbc.spi.ConnectionFactory
-import kotlin.coroutines.Continuation
-import kotlin.coroutines.startCoroutine
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.intrinsics.startCoroutineCancellable
 import kotlinx.coroutines.reactive.awaitSingle
-import kotlinx.coroutines.runBlocking
-import org.aspectj.lang.JoinPoint
+import kotlinx.coroutines.reactor.mono
 import org.aspectj.lang.ProceedingJoinPoint
 import org.aspectj.lang.annotation.Around
 import org.aspectj.lang.annotation.Aspect
-import org.aspectj.lang.annotation.Before
 import org.jooq.impl.DSL
 import org.springframework.boot.autoconfigure.SpringBootApplication
 import org.springframework.boot.runApplication
@@ -20,7 +13,7 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.data.r2dbc.repository.config.EnableR2dbcRepositories
 import org.springframework.security.access.prepost.PreAuthorize
-import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity
+import org.springframework.security.config.annotation.method.configuration.EnableReactiveMethodSecurity
 import org.springframework.security.config.annotation.web.reactive.EnableWebFluxSecurity
 import org.springframework.security.config.web.server.ServerHttpSecurity
 import org.springframework.security.web.server.SecurityWebFilterChain
@@ -30,15 +23,15 @@ import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.RestController
 import org.springframework.web.reactive.function.client.WebClient
 import org.springframework.web.reactive.function.client.awaitExchangeOrNull
-import  kotlin.coroutines.intrinsics.startCoroutineUninterceptedOrReturn
-import  kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
-import kotlin.coroutines.suspendCoroutine
+import kotlin.coroutines.Continuation
+import kotlin.coroutines.intrinsics.startCoroutineUninterceptedOrReturn
+import kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn
 
 @SpringBootApplication
 @RestController
 @EnableR2dbcRepositories
 @EnableWebFluxSecurity
-@EnableMethodSecurity
+@EnableReactiveMethodSecurity
 class R2dbcAopTrialApplication(
     private val jooqRepo: JooqRepo,
 ) {
@@ -65,28 +58,47 @@ class R2dbcAopTrialApplication(
 }
 
 @Component
+@Configuration
 class Authorizer(private val repo: JooqRepo) {
-    fun auth(): Boolean = runBlocking {
+    fun auth() = mono {
         println("through auth")
         repo.count()
         true
     }
 }
 
+val ProceedingJoinPoint.coroutineContinuation: Continuation<Any?>
+    get() = this.args.last() as Continuation<Any?>
+
+val ProceedingJoinPoint.coroutineArgs: Array<Any?>
+    get() = this.args.sliceArray(0 until this.args.size - 1)
+
+suspend fun ProceedingJoinPoint.proceedCoroutine(
+    args: Array<Any?> = this.coroutineArgs,
+): Any? = suspendCoroutineUninterceptedOrReturn { continuation ->
+    this.proceed(args + continuation)
+}
+
+fun ProceedingJoinPoint.runCoroutine(
+    block: suspend () -> Any?,
+): Any? =
+    block.startCoroutineUninterceptedOrReturn(this.coroutineContinuation)
+
 @Component
 @Aspect
 class Aspect(private val repo: JooqRepo) {
     @Around("execution(* aop(..)) || execution(* both(..))")
     fun execute(joinPoint: ProceedingJoinPoint): Any? {
-        val completion = joinPoint.args.last() as Continuation<Any>
-        return suspend {
-            println(Thread.currentThread().name)
+        return joinPoint.runCoroutine {
             repo.count()
-            suspendCoroutineUninterceptedOrReturn<Any> {
-                println(Thread.currentThread().name)
-                joinPoint.proceed(joinPoint.args.sliceArray(0..<joinPoint.args.size - 1) + it)
-            }
-        }.startCoroutineUninterceptedOrReturn(completion)
+            println("aop")
+            joinPoint.proceedCoroutine()!!
+        }
+    }
+
+    suspend fun dummy() {
+        suspendCoroutineUninterceptedOrReturn<Any> { }
+        suspend { }.startCoroutineUninterceptedOrReturn(TODO())
     }
 }
 
